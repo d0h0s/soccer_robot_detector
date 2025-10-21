@@ -1,0 +1,6 @@
+<launch>
+    <include file="$(find rtabmap_setup)/launch/rs_camera.launch"/>
+    <node pkg="soccer_robot_detector" type="soccer_robot_detector_node" name="soccer_robot_detector_node" output="screen">
+        <rosparam file="$(find soccer_robot_detector)/config/params.yaml" command="load" />
+    </node>
+</launch>
