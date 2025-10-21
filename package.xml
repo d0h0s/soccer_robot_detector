@@ -55,6 +55,9 @@
   <build_depend>cv_bridge</build_depend>
   <build_depend>image_transport</build_depend>
   <build_depend>opencv</build_depend>
+  <build_depend>message_filters</build_depend>
+  <build_depend>geometry_msgs</build_depend>
+  <build_depend>image_geometry</build_depend>
 
   <!-- 运行依赖 -->
   <exec_depend>roscpp</exec_depend>
@@ -62,6 +65,9 @@
   <exec_depend>cv_bridge</exec_depend>
   <exec_depend>image_transport</exec_depend>
   <exec_depend>opencv</exec_depend>
+  <exec_depend>message_filters</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>image_geometry</exec_depend>
 
   <export>
     <build_type>catkin</build_type>
