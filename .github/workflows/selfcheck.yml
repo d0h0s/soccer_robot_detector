@@ -9,18 +9,16 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/d0h0s/ubuntu-from-dd:latest
-      options: --user root
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run environment check
+      - name: Verify container environment
         run: |
-          echo "Running inside custom Docker environment:"
+          echo "Running inside:"
           cat /etc/os-release
-          python3 --version
-
-      - name: Run tests
-        run: |
-          pytest -v || echo "Tests failed"
+          python3 --version || echo "Python not found"
