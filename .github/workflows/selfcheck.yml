@@ -8,7 +8,7 @@ jobs:
   self-test:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/YOUR_GITHUB_USERNAME/ubuntu-from-dd:latest
+      image: ghcr.io/d0h0s/ubuntu-from-dd:latest
       options: --user root
 
     steps:
