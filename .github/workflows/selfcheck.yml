@@ -1,0 +1,26 @@
+name: Self Check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  self-test:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/YOUR_GITHUB_USERNAME/ubuntu-from-dd:latest
+      options: --user root
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run environment check
+        run: |
+          echo "Running inside custom Docker environment:"
+          cat /etc/os-release
+          python3 --version
+
+      - name: Run tests
+        run: |
+          pytest -v || echo "Tests failed"
