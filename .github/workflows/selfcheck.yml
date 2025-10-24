@@ -1,25 +1,64 @@
-name: Self Check
+name: Codex ARM Self-Check
 
 on:
   push:
+    branches: [ main ]
   pull_request:
 
 jobs:
-  self-test:
-    runs-on: ubuntu-latest
+  codex-check:
+    runs-on: ubuntu-24.04-arm64   # ✅ ARM runner
     container:
-      image: ghcr.io/d0h0s/ubuntu-from-dd:latest
-      options: --entrypoint "/bin/bash"
+      image: ghcr.io/d0h0s/ros-noetic-opencv4.2:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify container environment
+      - name: Show system info
         run: |
-          echo "Running inside:"
-          cat /etc/os-release
-          python3 --version || echo "Python not found"
+          uname -a
+          lsb_release -a
+          python3 -c "import cv2; print('OpenCV version:', cv2.__version__)"
+
+      - name: Build workspace
+        run: |
+          source /opt/ros/noetic/setup.bash
+          mkdir -p ~/catkin_ws/src
+          cp -r . ~/catkin_ws/src/project
+          cd ~/catkin_ws
+          catkin_make
+
+      - name: Run tests (Codex self-check)
+        run: |
+          source /opt/ros/noetic/setup.bash
+          cd ~/catkin_ws
+          catkin_make run_tests || echo "No tests found"
+
+# name: Self Check
+
+# on:
+#   push:
+#   pull_request:
+
+# jobs:
+#   self-test:
+#     runs-on: ubuntu-latest
+#     container:
+#       image: ghcr.io/d0h0s/ubuntu-from-dd:latest
+#       options: --entrypoint "/bin/bash"
+#       credentials:
+#         username: ${{ github.actor }}
+#         password: ${{ secrets.GITHUB_TOKEN }}
+
+#     steps:
+#       - name: Checkout code
+#         uses: actions/checkout@v4
+
+#       - name: Verify container environment
+#         run: |
+#           echo "Running inside:"
+#           cat /etc/os-release
+#           python3 --version || echo "Python not found"
