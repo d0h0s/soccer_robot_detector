@@ -1,0 +1,7 @@
+environment:
+  ros_distro: noetic
+  ros_version: 1
+  build_system: catkin
+  language: cpp
+  os: ubuntu20.04
+  platform: arm64
