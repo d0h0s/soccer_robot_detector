@@ -7,7 +7,7 @@ on:
 
 jobs:
   codex-check:
-    runs-on: ubuntu-24.04-arm64   # ✅ ARM runner
+    runs-on: ubuntu-24.04-arm64 
     container:
       image: ghcr.io/d0h0s/ros-noetic-opencv4.2:latest
       credentials:
