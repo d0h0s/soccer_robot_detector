@@ -6,7 +6,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <numeric>
+#include <sstream>
+#include <string>
 #include <utility>
 
 namespace
@@ -32,6 +35,7 @@ SoccerRobotDetector::SoccerRobotDetector(ros::NodeHandle& nh)
   nh_.param("param2", param2_, 30.0);
   nh_.param("minRadius", minRadius_, 30);
   nh_.param("maxRadius", maxRadius_, 200);
+  nh_.param("use_hough_circle", use_hough_circle_, true);
   nh_.param("use_harris", use_harris_, true);
   nh_.param("hough_rho", hough_rho_, 1.0);
   nh_.param("hough_theta", hough_theta_, 1.0);
@@ -47,6 +51,16 @@ SoccerRobotDetector::SoccerRobotDetector(ros::NodeHandle& nh)
   nh_.param("arc_max_fit_error", arc_max_fit_error_, 8.0);
   nh_.param("arc_min_coverage_deg", arc_min_coverage_deg_, 80.0);
   nh_.param("roi_padding_scale", roi_padding_scale_, 0.15);
+
+  nh_.param("short_length_ratio_min", short_length_ratio_min_, 0.25);
+  nh_.param("short_length_ratio_max", short_length_ratio_max_, 0.55);
+  nh_.param("long_length_ratio_min", long_length_ratio_min_, 0.55);
+  nh_.param("long_length_ratio_max", long_length_ratio_max_, 0.95);
+  nh_.param("thin_thickness_min", thin_thickness_min_, 1.0);
+  nh_.param("thin_thickness_max", thin_thickness_max_, 3.0);
+  nh_.param("thick_thickness_min", thick_thickness_min_, 3.0);
+  nh_.param("thick_thickness_max", thick_thickness_max_, 6.0);
+  nh_.param("thickness_search_radius", thickness_search_radius_, 8);
 
   image_sub_ = it_.subscribe("/camera/infra1/image_rect_raw", 1,
                              &SoccerRobotDetector::imageCallback, this);
@@ -75,8 +89,11 @@ void SoccerRobotDetector::imageCallback(const sensor_msgs::ImageConstPtr& msg)
   cv::cvtColor(gray, debug_img, cv::COLOR_GRAY2BGR);
 
   std::vector<cv::Vec3f> circles;
-  cv::HoughCircles(blur_img, circles, cv::HOUGH_GRADIENT, dp_, minDist_, param1_, param2_,
-                   minRadius_, maxRadius_);
+  if (use_hough_circle_)
+  {
+    cv::HoughCircles(blur_img, circles, cv::HOUGH_GRADIENT, dp_, minDist_, param1_, param2_,
+                     minRadius_, maxRadius_);
+  }
 
   bool detection_success = false;
   cv::Rect roi;
@@ -152,7 +169,15 @@ void SoccerRobotDetector::imageCallback(const sensor_msgs::ImageConstPtr& msg)
 
       cv::circle(debug_img, center_pixel, radius_px, cv::Scalar(0, 255, 255), 2);
       if (!arc_polyline.empty())
+      {
         cv::polylines(debug_img, arc_polyline, false, cv::Scalar(0, 165, 255), 2, cv::LINE_AA);
+        cv::circle(debug_img, arc_polyline.front(), 3, cv::Scalar(0, 200, 255), -1);
+        cv::circle(debug_img, arc_polyline.back(), 3, cv::Scalar(0, 200, 255), -1);
+      }
+      cv::rectangle(debug_img, arc_candidate.bounding_box, cv::Scalar(0, 140, 255), 1);
+      cv::circle(debug_img, cv::Point(cvRound(arc_candidate.center.x),
+                                      cvRound(arc_candidate.center.y)),
+                 3, cv::Scalar(0, 69, 255), -1);
     }
   }
 
@@ -179,13 +204,14 @@ void SoccerRobotDetector::imageCallback(const sensor_msgs::ImageConstPtr& msg)
 
   cv::Mat edges;
   cv::Canny(circle_roi, edges, canny_low, canny_high);
-  cv::dilate(edges, edges, cv::Mat(), cv::Point(-1, -1), 1);
+  cv::Mat edges_dilated;
+  cv::dilate(edges, edges_dilated, cv::Mat(), cv::Point(-1, -1), 1);
 
   std::vector<cv::Vec4i> raw_lines;
-  cv::HoughLinesP(edges, raw_lines, hough_rho_, CV_PI / 180.0 * hough_theta_,
+  cv::HoughLinesP(edges_dilated, raw_lines, hough_rho_, CV_PI / 180.0 * hough_theta_,
                   hough_threshold_ + 30, minLineLength_ + 30, maxLineGap_ / 2.0);
 
-  std::vector<cv::Vec4i> filtered_lines;
+  std::vector<LineFeature> filtered_lines;
   for (const auto& l : raw_lines)
   {
     cv::Point p1(l[0], l[1]);
@@ -213,13 +239,28 @@ void SoccerRobotDetector::imageCallback(const sensor_msgs::ImageConstPtr& msg)
     if (diff < 30)
       continue;
 
-    filtered_lines.push_back(l);
+    double length_ratio = len / static_cast<double>(radius_px);
+    double thickness = estimateLineThickness(edges, p1, p2);
+
+    LineClassification classification = classifyLine(length_ratio, thickness);
+    if (classification == LineClassification::Rejected)
+      continue;
+
+    filtered_lines.push_back({l, classification, len, thickness});
   }
 
-  for (const auto& l : filtered_lines)
+  for (const auto& lf : filtered_lines)
   {
-    cv::line(debug_img(roi), cv::Point(l[0], l[1]), cv::Point(l[2], l[3]),
-             cv::Scalar(255, 0, 0), 1);
+    const auto& l = lf.line;
+    cv::Scalar color = lf.classification == LineClassification::ShortThin
+                           ? cv::Scalar(255, 200, 0)
+                           : cv::Scalar(255, 0, 0);
+    int thickness_px = lf.classification == LineClassification::ShortThin ? 1 : 2;
+    cv::line(debug_img(roi), cv::Point(l[0], l[1]), cv::Point(l[2], l[3]), color,
+             thickness_px, cv::LINE_AA);
+    cv::Point mid((l[0] + l[2]) / 2, (l[1] + l[3]) / 2);
+    cv::putText(debug_img(roi), formatLineLabel(lf), mid, cv::FONT_HERSHEY_SIMPLEX, 0.3,
+                color, 1, cv::LINE_AA);
   }
 
   if (use_harris_)
@@ -253,6 +294,109 @@ void SoccerRobotDetector::imageCallback(const sensor_msgs::ImageConstPtr& msg)
   sensor_msgs::ImagePtr debug_msg =
       cv_bridge::CvImage(std_msgs::Header(), "bgr8", debug_img).toImageMsg();
   debug_pub_.publish(debug_msg);
+}
+
+double SoccerRobotDetector::estimateLineThickness(const cv::Mat& edge_img, const cv::Point& p1,
+                                                  const cv::Point& p2) const
+{
+  cv::Point2f dir(static_cast<float>(p2.x - p1.x), static_cast<float>(p2.y - p1.y));
+  double length = cv::norm(dir);
+  if (length < 1e-3)
+    return 0.0;
+
+  dir *= static_cast<float>(1.0 / length);
+  cv::Point2f normal(-dir.y, dir.x);
+
+  int samples = std::max(5, static_cast<int>(length / 10.0));
+  double total_width = 0.0;
+  int valid_samples = 0;
+  for (int i = 1; i <= samples; ++i)
+  {
+    double t = static_cast<double>(i) / (samples + 1);
+    cv::Point2f pt = cv::Point2f(static_cast<float>(p1.x), static_cast<float>(p1.y)) +
+                     dir * static_cast<float>(length * t);
+    double width = sampleThicknessAtPoint(edge_img, pt, normal);
+    if (width > 0.0)
+    {
+      total_width += width;
+      ++valid_samples;
+    }
+  }
+
+  if (valid_samples == 0)
+    return 0.0;
+
+  return total_width / static_cast<double>(valid_samples);
+}
+
+namespace
+{
+bool isInside(const cv::Mat& img, int x, int y)
+{
+  return x >= 0 && y >= 0 && x < img.cols && y < img.rows;
+}
+}  // namespace
+
+double SoccerRobotDetector::sampleThicknessAtPoint(const cv::Mat& edge_img,
+                                                   const cv::Point2f& point,
+                                                   const cv::Point2f& normal) const
+{
+  if (edge_img.empty())
+    return 0.0;
+
+  auto scan = [&](int direction) {
+    int last_on = -1;
+    bool seen_on = false;
+    for (int step = 0; step <= thickness_search_radius_; ++step)
+    {
+      float fx = point.x + normal.x * static_cast<float>(direction * step);
+      float fy = point.y + normal.y * static_cast<float>(direction * step);
+      int x = cvRound(fx);
+      int y = cvRound(fy);
+      if (!isInside(edge_img, x, y))
+        break;
+      if (edge_img.at<uchar>(y, x) > 0)
+      {
+        seen_on = true;
+        last_on = step;
+      }
+      else if (seen_on)
+      {
+        break;
+      }
+    }
+    return last_on < 0 ? 0 : last_on;
+  };
+
+  int pos = scan(1);
+  int neg = scan(-1);
+  if (pos == 0 && neg == 0)
+    return 0.0;
+
+  return static_cast<double>(pos + neg + 1);
+}
+
+SoccerRobotDetector::LineClassification
+SoccerRobotDetector::classifyLine(double length_ratio, double thickness) const
+{
+  if (length_ratio >= short_length_ratio_min_ && length_ratio <= short_length_ratio_max_ &&
+      thickness >= thin_thickness_min_ && thickness <= thin_thickness_max_)
+    return LineClassification::ShortThin;
+
+  if (length_ratio >= long_length_ratio_min_ && length_ratio <= long_length_ratio_max_ &&
+      thickness >= thick_thickness_min_ && thickness <= thick_thickness_max_)
+    return LineClassification::LongThick;
+
+  return LineClassification::Rejected;
+}
+
+std::string SoccerRobotDetector::formatLineLabel(const LineFeature& feature) const
+{
+  std::ostringstream oss;
+  oss << (feature.classification == LineClassification::ShortThin ? "S" : "L");
+  oss << " " << std::fixed << std::setprecision(0) << feature.length;
+  oss << "px /" << std::setprecision(1) << feature.thickness;
+  return oss.str();
 }
 
 bool SoccerRobotDetector::detectArcSegment(const cv::Mat& gray, ArcSegment& best_arc) const
