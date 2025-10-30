@@ -5,6 +5,8 @@
 #include "soccer_robot_detector/detector.h"
 
 #include <algorithm>
+#include <boost/bind/bind.hpp>
+#include <boost/bind.hpp>
 #include <cmath>
 #include <iomanip>
 #include <numeric>
@@ -23,6 +25,15 @@ cv::Rect clampRectToImage(const cv::Rect& rect, const cv::Size& image_size)
   if (width <= 0 || height <= 0)
     return cv::Rect();
   return cv::Rect(x, y, width, height);
+}
+
+int ensureOddKernel(int value, int min_value)
+{
+  if (value < min_value)
+    value = min_value;
+  if (value % 2 == 0)
+    ++value;
+  return value;
 }
 
 bool fitCircleLeastSquares(const std::vector<cv::Point2f>& points, cv::Point2f& center,
@@ -75,7 +86,7 @@ bool fitCircleLeastSquares(const std::vector<cv::Point2f>& points, cv::Point2f& 
 }  // namespace
 
 SoccerRobotDetector::SoccerRobotDetector(ros::NodeHandle& nh)
-    : nh_(nh), it_(nh)
+    : nh_(nh), it_(nh), reconfigure_server_(nh)
 {
   nh_.param("dp", dp_, 1.2);
   nh_.param("minDist", minDist_, 50.0);
@@ -85,20 +96,47 @@ SoccerRobotDetector::SoccerRobotDetector(ros::NodeHandle& nh)
   nh_.param("maxRadius", maxRadius_, 200);
   nh_.param("use_hough_circle", use_hough_circle_, true);
   nh_.param("use_harris", use_harris_, true);
+  nh_.param("roi_padding_scale", roi_padding_scale_, 0.15);
+  nh_.param("median_blur_kernel_size", median_blur_kernel_size_, 5);
+
   nh_.param("hough_rho", hough_rho_, 1.0);
   nh_.param("hough_theta", hough_theta_, 1.0);
   nh_.param("hough_threshold", hough_threshold_, 50);
   nh_.param("minLineLength", minLineLength_, 30.0);
   nh_.param("maxLineGap", maxLineGap_, 10.0);
+  nh_.param("line_hough_threshold_extra", line_hough_threshold_extra_, 30.0);
+  nh_.param("line_min_length_extra", line_min_length_extra_, 30.0);
+  nh_.param("line_max_gap_scale", line_max_gap_scale_, 0.5);
+  nh_.param("line_length_min_px", line_length_min_px_, 30.0);
+  nh_.param("line_length_max_radius_ratio", line_length_max_radius_ratio_, 1.3);
+  nh_.param("line_midpoint_max_radius_ratio", line_midpoint_max_radius_ratio_, 0.85);
+  nh_.param("line_angle_min_deg", line_angle_min_deg_, 15.0);
+  nh_.param("line_angle_max_deg", line_angle_max_deg_, 165.0);
+  nh_.param("line_intensity_diff_min", line_intensity_diff_min_, 30.0);
 
   nh_.param("maxCorners", maxCorners_, 50);
   nh_.param("qualityLevel", qualityLevel_, 0.02);
   nh_.param("minCornerDistance", minCornerDistance_, 10.0);
 
+  nh_.param("roi_canny_low_min", roi_canny_low_min_, 50.0);
+  nh_.param("roi_canny_low_base", roi_canny_low_base_, 120.0);
+  nh_.param("roi_canny_low_mean_scale", roi_canny_low_mean_scale_, 0.5);
+  nh_.param("roi_canny_high_ratio", roi_canny_high_ratio_, 2.5);
+  nh_.param("roi_edge_dilation_iterations", roi_edge_dilation_iterations_, 1);
+
   nh_.param("min_arc_points", min_arc_points_, 80);
   nh_.param("arc_max_fit_error", arc_max_fit_error_, 8.0);
   nh_.param("arc_min_coverage_deg", arc_min_coverage_deg_, 80.0);
-  nh_.param("roi_padding_scale", roi_padding_scale_, 0.15);
+  nh_.param("arc_blur_kernel_size", arc_blur_kernel_size_, 5);
+  nh_.param("arc_canny_low", arc_canny_low_, 60.0);
+  nh_.param("arc_canny_high", arc_canny_high_, 150.0);
+  nh_.param("arc_dilate_iterations", arc_dilate_iterations_, 1);
+  nh_.param("arc_approx_poly_epsilon", arc_approx_epsilon_, 2.0);
+  nh_.param("arc_score_error_weight", arc_score_error_weight_, 5.0);
+  nh_.param("arc_visualize_blur", arc_visualize_blur_, false);
+  nh_.param("arc_visualize_edges", arc_visualize_edges_, false);
+  nh_.param("arc_visualize_dilated_edges", arc_visualize_dilated_edges_, false);
+  nh_.param("arc_visualize_contours", arc_visualize_contours_, false);
 
   nh_.param("short_length_ratio_min", short_length_ratio_min_, 0.25);
   nh_.param("short_length_ratio_max", short_length_ratio_max_, 0.55);
@@ -110,11 +148,90 @@ SoccerRobotDetector::SoccerRobotDetector(ros::NodeHandle& nh)
   nh_.param("thick_thickness_max", thick_thickness_max_, 6.0);
   nh_.param("thickness_search_radius", thickness_search_radius_, 8);
 
+  median_blur_kernel_size_ = ensureOddKernel(median_blur_kernel_size_, 3);
+  arc_blur_kernel_size_ = ensureOddKernel(arc_blur_kernel_size_, 3);
+  if (arc_canny_high_ < arc_canny_low_)
+    arc_canny_high_ = arc_canny_low_;
+  if (line_angle_min_deg_ > line_angle_max_deg_)
+    line_angle_min_deg_ = line_angle_max_deg_;
+  roi_edge_dilation_iterations_ = std::max(0, roi_edge_dilation_iterations_);
+  arc_dilate_iterations_ = std::max(0, arc_dilate_iterations_);
+  thickness_search_radius_ = std::max(1, thickness_search_radius_);
+
   image_sub_ = it_.subscribe("/camera/infra1/image_rect_raw", 1,
                              &SoccerRobotDetector::imageCallback, this);
   debug_pub_ = it_.advertise("/soccer_robot_detector/debug", 1);
+  arc_blur_pub_ = it_.advertise("/soccer_robot_detector/arc/blurred", 1);
+  arc_edges_pub_ = it_.advertise("/soccer_robot_detector/arc/edges", 1);
+  arc_dilated_pub_ = it_.advertise("/soccer_robot_detector/arc/dilated_edges", 1);
+  arc_contours_pub_ = it_.advertise("/soccer_robot_detector/arc/contours", 1);
 
   has_last_circle_ = false;
+
+  soccer_robot_detector::SoccerRobotDetectorConfig initial_config;
+  initial_config.use_hough_circle = use_hough_circle_;
+  initial_config.dp = dp_;
+  initial_config.minDist = minDist_;
+  initial_config.param1 = param1_;
+  initial_config.param2 = param2_;
+  initial_config.minRadius = minRadius_;
+  initial_config.maxRadius = maxRadius_;
+  initial_config.roi_padding_scale = roi_padding_scale_;
+  initial_config.median_blur_kernel_size = median_blur_kernel_size_;
+  initial_config.use_harris = use_harris_;
+  initial_config.maxCorners = maxCorners_;
+  initial_config.qualityLevel = qualityLevel_;
+  initial_config.minCornerDistance = minCornerDistance_;
+  initial_config.hough_rho = hough_rho_;
+  initial_config.hough_theta = hough_theta_;
+  initial_config.hough_threshold = hough_threshold_;
+  initial_config.minLineLength = minLineLength_;
+  initial_config.maxLineGap = maxLineGap_;
+  initial_config.line_hough_threshold_extra = line_hough_threshold_extra_;
+  initial_config.line_min_length_extra = line_min_length_extra_;
+  initial_config.line_max_gap_scale = line_max_gap_scale_;
+  initial_config.line_length_min_px = line_length_min_px_;
+  initial_config.line_length_max_radius_ratio = line_length_max_radius_ratio_;
+  initial_config.line_midpoint_max_radius_ratio = line_midpoint_max_radius_ratio_;
+  initial_config.line_angle_min_deg = line_angle_min_deg_;
+  initial_config.line_angle_max_deg = line_angle_max_deg_;
+  initial_config.line_intensity_diff_min = line_intensity_diff_min_;
+  initial_config.roi_canny_low_min = roi_canny_low_min_;
+  initial_config.roi_canny_low_base = roi_canny_low_base_;
+  initial_config.roi_canny_low_mean_scale = roi_canny_low_mean_scale_;
+  initial_config.roi_canny_high_ratio = roi_canny_high_ratio_;
+  initial_config.roi_edge_dilation_iterations = roi_edge_dilation_iterations_;
+  initial_config.min_arc_points = min_arc_points_;
+  initial_config.arc_max_fit_error = arc_max_fit_error_;
+  initial_config.arc_min_coverage_deg = arc_min_coverage_deg_;
+  initial_config.arc_blur_kernel_size = arc_blur_kernel_size_;
+  initial_config.arc_canny_low = arc_canny_low_;
+  initial_config.arc_canny_high = arc_canny_high_;
+  initial_config.arc_dilate_iterations = arc_dilate_iterations_;
+  initial_config.arc_approx_poly_epsilon = arc_approx_epsilon_;
+  initial_config.arc_score_error_weight = arc_score_error_weight_;
+  initial_config.short_length_ratio_min = short_length_ratio_min_;
+  initial_config.short_length_ratio_max = short_length_ratio_max_;
+  initial_config.long_length_ratio_min = long_length_ratio_min_;
+  initial_config.long_length_ratio_max = long_length_ratio_max_;
+  initial_config.thin_thickness_min = thin_thickness_min_;
+  initial_config.thin_thickness_max = thin_thickness_max_;
+  initial_config.thick_thickness_min = thick_thickness_min_;
+  initial_config.thick_thickness_max = thick_thickness_max_;
+  initial_config.thickness_search_radius = thickness_search_radius_;
+  initial_config.arc_visualize_blur = arc_visualize_blur_;
+  initial_config.arc_visualize_edges = arc_visualize_edges_;
+  initial_config.arc_visualize_dilated_edges = arc_visualize_dilated_edges_;
+  initial_config.arc_visualize_contours = arc_visualize_contours_;
+
+  enforceParameterConstraints(initial_config);
+  reconfigureCallback(initial_config, 0);
+
+  dynamic_reconfigure::Server<soccer_robot_detector::SoccerRobotDetectorConfig>::CallbackType cb;
+  cb = boost::bind(&SoccerRobotDetector::reconfigureCallback, this, boost::placeholders::_1,
+                   boost::placeholders::_2);
+  reconfigure_server_.setCallback(cb);
+  reconfigure_server_.updateConfig(initial_config);
 }
 
 void SoccerRobotDetector::imageCallback(const sensor_msgs::ImageConstPtr& msg)
@@ -131,7 +248,7 @@ void SoccerRobotDetector::imageCallback(const sensor_msgs::ImageConstPtr& msg)
   }
 
   cv::Mat blur_img;
-  cv::medianBlur(gray, blur_img, 5);
+  cv::medianBlur(gray, blur_img, median_blur_kernel_size_);
 
   cv::Mat debug_img;
   cv::cvtColor(gray, debug_img, cv::COLOR_GRAY2BGR);
@@ -184,7 +301,17 @@ void SoccerRobotDetector::imageCallback(const sensor_msgs::ImageConstPtr& msg)
   if (!detection_success)
   {
     ArcSegment arc_candidate;
-    if (detectArcSegment(blur_img, arc_candidate))
+    bool need_arc_debug = arc_visualize_blur_ || arc_visualize_edges_ ||
+                          arc_visualize_dilated_edges_ || arc_visualize_contours_;
+    ArcDebugImages arc_debug_images;
+    ArcDebugImages* debug_ptr = need_arc_debug ? &arc_debug_images : nullptr;
+
+    bool arc_found = detectArcSegment(blur_img, arc_candidate, debug_ptr);
+    if (need_arc_debug)
+      publishArcDebugImages(arc_debug_images, msg->header, gray,
+                            arc_found ? &arc_candidate : nullptr, arc_found);
+
+    if (arc_found)
     {
       cv::Point2f center_f = arc_candidate.center;
       float radius_f = arc_candidate.radius;
@@ -203,12 +330,11 @@ void SoccerRobotDetector::imageCallback(const sensor_msgs::ImageConstPtr& msg)
       has_last_circle_ = true;
 
       int padding = static_cast<int>(roi_padding_scale_ * radius_px);
-      cv::Rect padded = arc_candidate.bounding_box;
-      padded.x -= padding;
-      padded.y -= padding;
-      padded.width += padding * 2;
-      padded.height += padding * 2;
-      roi = clampRectToImage(padded, gray.size());
+      int x1 = center_pixel.x - radius_px - padding;
+      int y1 = center_pixel.y - radius_px - padding;
+      int x2 = center_pixel.x + radius_px + padding;
+      int y2 = center_pixel.y + radius_px + padding;
+      roi = clampRectToImage(cv::Rect(x1, y1, x2 - x1, y2 - y1), gray.size());
       detection_success = roi.area() > 0;
 
       arc_polyline.reserve(arc_candidate.points.size());
@@ -247,17 +373,25 @@ void SoccerRobotDetector::imageCallback(const sensor_msgs::ImageConstPtr& msg)
   cv::magnitude(grad_x, grad_y, grad_mag);
 
   double mean_intensity = cv::mean(circle_roi)[0];
-  double canny_low = std::max(50.0, 120.0 - mean_intensity / 2.0);
-  double canny_high = canny_low * 2.5;
+  double adaptive_low = roi_canny_low_base_ - mean_intensity * roi_canny_low_mean_scale_;
+  double canny_low = std::max(roi_canny_low_min_, adaptive_low);
+  double canny_high = canny_low * roi_canny_high_ratio_;
 
   cv::Mat edges;
   cv::Canny(circle_roi, edges, canny_low, canny_high);
   cv::Mat edges_dilated;
-  cv::dilate(edges, edges_dilated, cv::Mat(), cv::Point(-1, -1), 1);
+  if (roi_edge_dilation_iterations_ > 0)
+    cv::dilate(edges, edges_dilated, cv::Mat(), cv::Point(-1, -1), roi_edge_dilation_iterations_);
+  else
+    edges.copyTo(edges_dilated);
 
   std::vector<cv::Vec4i> raw_lines;
-  cv::HoughLinesP(edges_dilated, raw_lines, hough_rho_, CV_PI / 180.0 * hough_theta_,
-                  hough_threshold_ + 30, minLineLength_ + 30, maxLineGap_ / 2.0);
+  double theta_resolution = CV_PI / 180.0 * hough_theta_;
+  double hough_threshold = hough_threshold_ + line_hough_threshold_extra_;
+  double min_line_length = minLineLength_ + line_min_length_extra_;
+  double max_line_gap = maxLineGap_ * line_max_gap_scale_;
+  cv::HoughLinesP(edges_dilated, raw_lines, hough_rho_, theta_resolution, hough_threshold,
+                  min_line_length, max_line_gap);
 
   std::vector<LineFeature> filtered_lines;
   for (const auto& l : raw_lines)
@@ -265,15 +399,15 @@ void SoccerRobotDetector::imageCallback(const sensor_msgs::ImageConstPtr& msg)
     cv::Point p1(l[0], l[1]);
     cv::Point p2(l[2], l[3]);
     double len = cv::norm(p1 - p2);
-    if (len < 30 || len > radius_px * 1.3)
+    if (len < line_length_min_px_ || len > radius_px * line_length_max_radius_ratio_)
       continue;
 
     cv::Point mid((p1.x + p2.x) / 2, (p1.y + p2.y) / 2);
-    if (cv::norm(mid - roi_center) > radius_px * 0.85)
+    if (cv::norm(mid - roi_center) > radius_px * line_midpoint_max_radius_ratio_)
       continue;
 
     double angle = std::fabs(std::atan2(p2.y - p1.y, p2.x - p1.x) * 180.0 / CV_PI);
-    if (angle < 15 || angle > 165)
+    if (angle < line_angle_min_deg_ || angle > line_angle_max_deg_)
       continue;
 
     cv::LineIterator it(circle_roi, p1, p2);
@@ -284,7 +418,7 @@ void SoccerRobotDetector::imageCallback(const sensor_msgs::ImageConstPtr& msg)
 
     auto minmax = std::minmax_element(profile.begin(), profile.end());
     double diff = std::fabs(*minmax.second - *minmax.first);
-    if (diff < 30)
+    if (diff < line_intensity_diff_min_)
       continue;
 
     double length_ratio = len / static_cast<double>(radius_px);
@@ -447,19 +581,76 @@ std::string SoccerRobotDetector::formatLineLabel(const LineFeature& feature) con
   return oss.str();
 }
 
-bool SoccerRobotDetector::detectArcSegment(const cv::Mat& gray, ArcSegment& best_arc) const
+void SoccerRobotDetector::publishArcDebugImages(const ArcDebugImages& images,
+                                                const std_msgs::Header& header,
+                                                const cv::Mat& gray, const ArcSegment* arc,
+                                                bool arc_found)
+{
+  if (arc_visualize_blur_ && !images.blurred.empty())
+  {
+    cv_bridge::CvImage cv_image(header, "mono8", images.blurred);
+    arc_blur_pub_.publish(cv_image.toImageMsg());
+  }
+
+  if (arc_visualize_edges_ && !images.edges.empty())
+  {
+    cv_bridge::CvImage cv_image(header, "mono8", images.edges);
+    arc_edges_pub_.publish(cv_image.toImageMsg());
+  }
+
+  if (arc_visualize_dilated_edges_ && !images.dilated_edges.empty())
+  {
+    cv_bridge::CvImage cv_image(header, "mono8", images.dilated_edges);
+    arc_dilated_pub_.publish(cv_image.toImageMsg());
+  }
+
+  if (arc_visualize_contours_ && !gray.empty())
+  {
+    cv::Mat overlay;
+    cv::cvtColor(gray, overlay, cv::COLOR_GRAY2BGR);
+    if (arc_found && arc != nullptr)
+    {
+      std::vector<cv::Point> pts;
+      pts.reserve(arc->points.size());
+      for (const auto& pt : arc->points)
+        pts.emplace_back(cvRound(pt.x), cvRound(pt.y));
+      if (!pts.empty())
+        cv::polylines(overlay, pts, false, cv::Scalar(0, 255, 255), 2, cv::LINE_AA);
+
+      cv::circle(overlay, cv::Point(cvRound(arc->center.x), cvRound(arc->center.y)),
+                 cvRound(arc->radius), cv::Scalar(0, 255, 0), 1, cv::LINE_AA);
+      cv::rectangle(overlay, arc->bounding_box, cv::Scalar(0, 140, 255), 1);
+    }
+
+    cv_bridge::CvImage cv_image(header, "bgr8", overlay);
+    arc_contours_pub_.publish(cv_image.toImageMsg());
+  }
+}
+
+bool SoccerRobotDetector::detectArcSegment(const cv::Mat& gray, ArcSegment& best_arc,
+                                           ArcDebugImages* debug) const
 {
   cv::Mat blurred;
-  cv::GaussianBlur(gray, blurred, cv::Size(5, 5), 0);
+  cv::GaussianBlur(gray, blurred, cv::Size(arc_blur_kernel_size_, arc_blur_kernel_size_), 0);
+  if (debug && arc_visualize_blur_)
+    blurred.copyTo(debug->blurred);
 
-  double canny_low = 60.0;
-  double canny_high = 150.0;
   cv::Mat edges;
-  cv::Canny(blurred, edges, canny_low, canny_high);
-  cv::dilate(edges, edges, cv::Mat(), cv::Point(-1, -1), 1);
+  cv::Canny(blurred, edges, arc_canny_low_, arc_canny_high_);
+  if (debug && arc_visualize_edges_)
+    edges.copyTo(debug->edges);
+
+  cv::Mat dilated_edges;
+  if (arc_dilate_iterations_ > 0)
+    cv::dilate(edges, dilated_edges, cv::Mat(), cv::Point(-1, -1), arc_dilate_iterations_);
+  else
+    dilated_edges = edges.clone();
+
+  if (debug && arc_visualize_dilated_edges_)
+    dilated_edges.copyTo(debug->dilated_edges);
 
   std::vector<std::vector<cv::Point>> contours;
-  cv::findContours(edges, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
+  cv::findContours(dilated_edges, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
 
   double best_score = -1.0;
   for (const auto& contour : contours)
@@ -468,7 +659,7 @@ bool SoccerRobotDetector::detectArcSegment(const cv::Mat& gray, ArcSegment& best
       continue;
 
     std::vector<cv::Point> simplified;
-    cv::approxPolyDP(contour, simplified, 2.0, false);
+    cv::approxPolyDP(contour, simplified, arc_approx_epsilon_, false);
     const auto& candidate = simplified.empty() ? contour : simplified;
 
     if (candidate.size() < 5)
@@ -503,7 +694,7 @@ bool SoccerRobotDetector::detectArcSegment(const cv::Mat& gray, ArcSegment& best
     if (coverage_deg < arc_min_coverage_deg_)
       continue;
 
-    double score = coverage_deg - mean_error * 5.0;
+    double score = coverage_deg - mean_error * arc_score_error_weight_;
     if (score > best_score)
     {
       best_score = score;
@@ -517,6 +708,122 @@ bool SoccerRobotDetector::detectArcSegment(const cv::Mat& gray, ArcSegment& best
   }
 
   return best_score >= 0.0;
+}
+
+void SoccerRobotDetector::enforceParameterConstraints(
+    soccer_robot_detector::SoccerRobotDetectorConfig& config)
+{
+  config.median_blur_kernel_size = ensureOddKernel(config.median_blur_kernel_size, 3);
+  config.arc_blur_kernel_size = ensureOddKernel(config.arc_blur_kernel_size, 3);
+
+  if (config.maxRadius < config.minRadius)
+    config.maxRadius = config.minRadius;
+
+  if (config.arc_canny_high < config.arc_canny_low)
+    config.arc_canny_high = config.arc_canny_low;
+
+  if (config.line_angle_min_deg > config.line_angle_max_deg)
+    config.line_angle_min_deg = config.line_angle_max_deg;
+
+  if (config.short_length_ratio_max < config.short_length_ratio_min)
+    config.short_length_ratio_max = config.short_length_ratio_min;
+
+  if (config.long_length_ratio_max < config.long_length_ratio_min)
+    config.long_length_ratio_max = config.long_length_ratio_min;
+
+  if (config.thin_thickness_max < config.thin_thickness_min)
+    config.thin_thickness_max = config.thin_thickness_min;
+
+  if (config.thick_thickness_max < config.thick_thickness_min)
+    config.thick_thickness_max = config.thick_thickness_min;
+
+  if (config.line_length_min_px < 0.0)
+    config.line_length_min_px = 0.0;
+
+  if (config.line_length_max_radius_ratio < 0.0)
+    config.line_length_max_radius_ratio = 0.0;
+
+  if (config.line_midpoint_max_radius_ratio < 0.0)
+    config.line_midpoint_max_radius_ratio = 0.0;
+
+  if (config.line_intensity_diff_min < 0.0)
+    config.line_intensity_diff_min = 0.0;
+
+  if (config.roi_canny_high_ratio < 1.0)
+    config.roi_canny_high_ratio = 1.0;
+
+  if (config.line_max_gap_scale < 0.0)
+    config.line_max_gap_scale = 0.0;
+
+  config.roi_edge_dilation_iterations = std::max(0, config.roi_edge_dilation_iterations);
+  config.arc_dilate_iterations = std::max(0, config.arc_dilate_iterations);
+  config.thickness_search_radius = std::max(1, config.thickness_search_radius);
+}
+
+void SoccerRobotDetector::reconfigureCallback(
+    soccer_robot_detector::SoccerRobotDetectorConfig& config, uint32_t)
+{
+  enforceParameterConstraints(config);
+
+  use_hough_circle_ = config.use_hough_circle;
+  dp_ = config.dp;
+  minDist_ = config.minDist;
+  param1_ = config.param1;
+  param2_ = config.param2;
+  minRadius_ = config.minRadius;
+  maxRadius_ = config.maxRadius;
+  roi_padding_scale_ = config.roi_padding_scale;
+  median_blur_kernel_size_ = config.median_blur_kernel_size;
+  use_harris_ = config.use_harris;
+  maxCorners_ = config.maxCorners;
+  qualityLevel_ = config.qualityLevel;
+  minCornerDistance_ = config.minCornerDistance;
+
+  hough_rho_ = config.hough_rho;
+  hough_theta_ = config.hough_theta;
+  hough_threshold_ = config.hough_threshold;
+  minLineLength_ = config.minLineLength;
+  maxLineGap_ = config.maxLineGap;
+  line_hough_threshold_extra_ = config.line_hough_threshold_extra;
+  line_min_length_extra_ = config.line_min_length_extra;
+  line_max_gap_scale_ = config.line_max_gap_scale;
+  line_length_min_px_ = config.line_length_min_px;
+  line_length_max_radius_ratio_ = config.line_length_max_radius_ratio;
+  line_midpoint_max_radius_ratio_ = config.line_midpoint_max_radius_ratio;
+  line_angle_min_deg_ = config.line_angle_min_deg;
+  line_angle_max_deg_ = config.line_angle_max_deg;
+  line_intensity_diff_min_ = config.line_intensity_diff_min;
+
+  roi_canny_low_min_ = config.roi_canny_low_min;
+  roi_canny_low_base_ = config.roi_canny_low_base;
+  roi_canny_low_mean_scale_ = config.roi_canny_low_mean_scale;
+  roi_canny_high_ratio_ = config.roi_canny_high_ratio;
+  roi_edge_dilation_iterations_ = config.roi_edge_dilation_iterations;
+
+  min_arc_points_ = config.min_arc_points;
+  arc_max_fit_error_ = config.arc_max_fit_error;
+  arc_min_coverage_deg_ = config.arc_min_coverage_deg;
+  arc_blur_kernel_size_ = config.arc_blur_kernel_size;
+  arc_canny_low_ = config.arc_canny_low;
+  arc_canny_high_ = config.arc_canny_high;
+  arc_dilate_iterations_ = config.arc_dilate_iterations;
+  arc_approx_epsilon_ = config.arc_approx_poly_epsilon;
+  arc_score_error_weight_ = config.arc_score_error_weight;
+
+  short_length_ratio_min_ = config.short_length_ratio_min;
+  short_length_ratio_max_ = config.short_length_ratio_max;
+  long_length_ratio_min_ = config.long_length_ratio_min;
+  long_length_ratio_max_ = config.long_length_ratio_max;
+  thin_thickness_min_ = config.thin_thickness_min;
+  thin_thickness_max_ = config.thin_thickness_max;
+  thick_thickness_min_ = config.thick_thickness_min;
+  thick_thickness_max_ = config.thick_thickness_max;
+  thickness_search_radius_ = config.thickness_search_radius;
+
+  arc_visualize_blur_ = config.arc_visualize_blur;
+  arc_visualize_edges_ = config.arc_visualize_edges;
+  arc_visualize_dilated_edges_ = config.arc_visualize_dilated_edges;
+  arc_visualize_contours_ = config.arc_visualize_contours;
 }
 
 double SoccerRobotDetector::computeAngularCoverage(const std::vector<cv::Point2f>& points,
