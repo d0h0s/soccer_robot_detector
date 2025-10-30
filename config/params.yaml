@@ -1,20 +1,38 @@
-# ---------- 霍夫圆检测 ----------
-dp: 1.2                # 累积器分辨率比例
-minDist: 100.0          # 圆心之间的最小距离
-param1: 180.0           # Canny高阈值
-param2: 40.0            # 圆检测阈值（越高越严格）
-minRadius: 40           # 圆最小半径
-maxRadius: 120          # 圆最大半径
+# ---------- Circle detection ----------
+use_hough_circle: true
+dp: 1.2
+minDist: 100.0
+param1: 180.0
+param2: 40.0
+minRadius: 40
+maxRadius: 120
 
-# ---------- 霍夫直线检测 ----------
-hough_rho: 1.0          # 距离分辨率 (像素)
-hough_theta: 1.0        # 角度分辨率 (°)
-hough_threshold: 50      # 检测阈值 (累积器最小票数)
-minLineLength: 30        # 线段最小长度 (像素)
-maxLineGap: 15           # 线段最大间隙 (像素)
+# ---------- Line detection ----------
+hough_rho: 1.0
+hough_theta: 1.0
+hough_threshold: 50
+minLineLength: 30
+maxLineGap: 15
 
-# ---------- 角点检测 ----------
-use_harris: false        # 是否使用 Harris 角点
+# ---------- Corner detection ----------
+use_harris: false
 maxCorners: 30
 qualityLevel: 0.04
 minCornerDistance: 15
+
+# ---------- Arc detection ----------
+min_arc_points: 60
+arc_max_fit_error: 5.0
+arc_min_coverage_deg: 70.0
+roi_padding_scale: 0.18
+
+# ---------- Soccer pattern priors ----------
+short_length_ratio_min: 0.25
+short_length_ratio_max: 0.55
+long_length_ratio_min: 0.55
+long_length_ratio_max: 0.95
+thin_thickness_min: 1.0
+thin_thickness_max: 3.0
+thick_thickness_min: 3.0
+thick_thickness_max: 6.0
+thickness_search_radius: 8

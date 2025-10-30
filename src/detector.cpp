@@ -24,6 +24,54 @@ cv::Rect clampRectToImage(const cv::Rect& rect, const cv::Size& image_size)
     return cv::Rect();
   return cv::Rect(x, y, width, height);
 }
+
+bool fitCircleLeastSquares(const std::vector<cv::Point2f>& points, cv::Point2f& center,
+                           float& radius)
+{
+  if (points.size() < 3)
+    return false;
+
+  cv::Point2f mean(0.0f, 0.0f);
+  for (const auto& pt : points)
+  {
+    mean.x += pt.x;
+    mean.y += pt.y;
+  }
+  mean.x /= static_cast<float>(points.size());
+  mean.y /= static_cast<float>(points.size());
+
+  cv::Mat A(points.size(), 3, CV_64F);
+  cv::Mat b(points.size(), 1, CV_64F);
+  for (size_t i = 0; i < points.size(); ++i)
+  {
+    double x = static_cast<double>(points[i].x - mean.x);
+    double y = static_cast<double>(points[i].y - mean.y);
+    A.at<double>(i, 0) = 2.0 * x;
+    A.at<double>(i, 1) = 2.0 * y;
+    A.at<double>(i, 2) = 1.0;
+    b.at<double>(i, 0) = x * x + y * y;
+  }
+
+  cv::Mat sol;
+  if (!cv::solve(A, b, sol, cv::DECOMP_SVD))
+    return false;
+
+  double cx = sol.at<double>(0);
+  double cy = sol.at<double>(1);
+  double d = sol.at<double>(2);
+  double r_sq = cx * cx + cy * cy + d;
+  if (r_sq <= 0.0)
+    return false;
+
+  cx += static_cast<double>(mean.x);
+  cy += static_cast<double>(mean.y);
+
+  center = cv::Point2f(static_cast<float>(cx), static_cast<float>(cy));
+  radius = static_cast<float>(std::sqrt(r_sq));
+
+  return std::isfinite(center.x) && std::isfinite(center.y) && std::isfinite(radius) &&
+         radius > 0.0f;
+}
 }  // namespace
 
 SoccerRobotDetector::SoccerRobotDetector(ros::NodeHandle& nh)
@@ -419,14 +467,22 @@ bool SoccerRobotDetector::detectArcSegment(const cv::Mat& gray, ArcSegment& best
     if (static_cast<int>(contour.size()) < min_arc_points_)
       continue;
 
+    std::vector<cv::Point> simplified;
+    cv::approxPolyDP(contour, simplified, 2.0, false);
+    const auto& candidate = simplified.empty() ? contour : simplified;
+
+    if (candidate.size() < 5)
+      continue;
+
     std::vector<cv::Point2f> pts;
-    pts.reserve(contour.size());
-    for (const auto& p : contour)
+    pts.reserve(candidate.size());
+    for (const auto& p : candidate)
       pts.emplace_back(static_cast<float>(p.x), static_cast<float>(p.y));
 
     cv::Point2f center;
     float radius;
-    cv::minEnclosingCircle(pts, center, radius);
+    if (!fitCircleLeastSquares(pts, center, radius))
+      continue;
 
     if (radius < static_cast<float>(minRadius_) || radius > static_cast<float>(maxRadius_))
       continue;
