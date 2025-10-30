@@ -8,6 +8,8 @@
 #include <ros/ros.h>
 #include <sensor_msgs/Image.h>
 #include <cv_bridge/cv_bridge.h>
+#include <string>
+#include <vector>
 
 class SoccerRobotDetector
 {
@@ -26,9 +28,30 @@ private:
     double mean_error = 0.0;
   };
 
+  enum class LineClassification
+  {
+    ShortThin,
+    LongThick,
+    Rejected
+  };
+
+  struct LineFeature
+  {
+    cv::Vec4i line;
+    LineClassification classification;
+    double length = 0.0;
+    double thickness = 0.0;
+  };
+
   bool detectArcSegment(const cv::Mat& gray, ArcSegment& best_arc) const;
   static double computeAngularCoverage(const std::vector<cv::Point2f>& points,
                                        const cv::Point2f& center);
+  double estimateLineThickness(const cv::Mat& edge_img, const cv::Point& p1,
+                               const cv::Point& p2) const;
+  double sampleThicknessAtPoint(const cv::Mat& edge_img, const cv::Point2f& point,
+                                const cv::Point2f& normal) const;
+  LineClassification classifyLine(double length_ratio, double thickness) const;
+  std::string formatLineLabel(const LineFeature& feature) const;
 
   ros::NodeHandle nh_;
   image_transport::ImageTransport it_;
@@ -38,6 +61,7 @@ private:
   double dp_, minDist_, param1_, param2_;
   int minRadius_, maxRadius_;
   bool use_harris_;
+  bool use_hough_circle_ = true;
 
   // Hough line parameters
   double hough_rho_;
@@ -59,5 +83,16 @@ private:
   double arc_max_fit_error_;
   double arc_min_coverage_deg_;
   double roi_padding_scale_;
+
+  // Soccer pattern prior parameters
+  double short_length_ratio_min_;
+  double short_length_ratio_max_;
+  double long_length_ratio_min_;
+  double long_length_ratio_max_;
+  double thin_thickness_min_;
+  double thin_thickness_max_;
+  double thick_thickness_min_;
+  double thick_thickness_max_;
+  int thickness_search_radius_;
 };
 
